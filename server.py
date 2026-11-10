@@ -20,7 +20,14 @@ app.add_middleware(
 )
 
 MODEL_PATH = "models/arecanut_classifier.keras"
-model = tf.keras.models.load_model(MODEL_PATH)
+import tf_keras
+
+# Load model architecture and weights without re-compiling training graphs
+try:
+    model = tf_keras.models.load_model(MODEL_PATH, compile=False)
+except Exception:
+    import tensorflow as tf
+    model = tf.keras.models.load_model(MODEL_PATH, compile=False)
 
 CLASSES = [
     'Bud_Borer_Rot', 
