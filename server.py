@@ -27,7 +27,7 @@ app.add_middleware(
 # 1. Model & Paths Setup
 # ---------------------------------------------------------
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-MODEL_PATH = os.path.join(BASE_DIR, "models", "arecanut_classifier.keras")
+MODEL_PATH = os.path.join(BASE_DIR, "models", "arecanut_classifier.h5")
 
 try:
     model = tf.keras.models.load_model(MODEL_PATH)
