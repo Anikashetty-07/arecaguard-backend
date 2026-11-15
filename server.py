@@ -55,19 +55,17 @@ except Exception as e:
     print(f"ERROR: Failed to load model -> {e}")
 
 CLASS_NAMES = [
-    "Bud_Rot",
-    "Foot_Rot",
+    "Bud_Borer_Rot",
     "Healthy",
-    "Mahali_Koleroga",
+    "Koleroga",
     "Stem_Bleeding",
     "Yellow_Leaf_Disease"
 ]
 
 APP_DISEASE_MAP = {
-    "Bud_Rot": "Bud_Borer_Rot",
-    "Foot_Rot": "Foot_Rot",
+    "Bud_Borer_Rot": "Bud_Borer_Rot",
     "Healthy": "Healthy",
-    "Mahali_Koleroga": "Koleroga",
+    "Koleroga": "Koleroga",
     "Stem_Bleeding": "Stem_Bleeding",
     "Yellow_Leaf_Disease": "Yellow_Leaf_Disease",
 }
