@@ -3,7 +3,7 @@ import io
 import os
 import base64
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageOps
 import cv2
 import tensorflow as tf
 from pydantic import BaseModel
@@ -54,11 +54,13 @@ except Exception as e:
     model = None
     print(f"ERROR: Failed to load model -> {e}")
 
+# Exact 6 classes matching dataset_ready alphabetical folder order
 CLASS_NAMES = [
     "Bud_Borer_Rot",
     "Healthy",
     "Koleroga",
     "Stem_Bleeding",
+    "Stem_Cracking",
     "Yellow_Leaf_Disease"
 ]
 
@@ -67,6 +69,7 @@ APP_DISEASE_MAP = {
     "Healthy": "Healthy",
     "Koleroga": "Koleroga",
     "Stem_Bleeding": "Stem_Bleeding",
+    "Stem_Cracking": "Stem_Cracking",
     "Yellow_Leaf_Disease": "Yellow_Leaf_Disease",
 }
 
@@ -84,7 +87,7 @@ TREATMENTS = {
             "Conduct routine crown and stem canopy checks."
         ]
     },
-    "Mahali_Koleroga": {
+    "Koleroga": {
         "status": "Severe Fungal Infection",
         "description": "Fruit rot / Koleroga caused by Phytophthora meadii, common during heavy monsoon.",
         "advisory_en": "Immediate 1% Bordeaux mixture spray recommended during a dry spell to arrest fruit rot.",
@@ -117,7 +120,18 @@ TREATMENTS = {
             "Apply Trichoderma-enriched neem cake (5 kg per palm) in the root basin."
         ]
     },
-    "Bud_Rot": {
+    "Stem_Cracking": {
+        "status": "Sun Scorch / Moisture Stress Fissures",
+        "description": "Longitudinal bark splitting on exposed trunks caused by intense summer heat and irregular irrigation.",
+        "advisory_en": "Whitewash exposed trunks with slaked lime up to 2.5m and maintain regular summer drip irrigation.",
+        "advisory_kn": "ಬೇಸಿಗೆಯ ಬಿಸಿಲಿನಿಂದ ಕಾಂಡ ಬಿರುಕು ಬಿಡದಂತೆ ಸುಣ್ಣ ಬಳಿಯಿರಿ ಮತ್ತು ನಿಯಮಿತ ನೀರುಣಿಸಿ.",
+        "management": [
+            "Apply thick slaked lime whitewash on sun-exposed south-western trunk surfaces.",
+            "Ensure consistent summer irrigation and basin mulching to prevent moisture fluctuation.",
+            "Seal deep fissures with Bordeaux paste to prevent secondary fungal entry."
+        ]
+    },
+    "Bud_Borer_Rot": {
         "status": "Phytophthora palmivora Infection",
         "description": "Infection of growing bud tissues resulting in rotting and heart leaf shedding.",
         "advisory_en": "Excise decaying spindle tissue immediately and apply 10% Bordeaux paste into the crown.",
@@ -126,17 +140,6 @@ TREATMENTS = {
             "Scoop out infected rotten spindle and bud tissue in the early stage.",
             "Treat crown cavity with 10% Bordeaux paste or apply Mancozeb paste.",
             "Cover treated crown with a protective cap to shield from rainwater."
-        ]
-    },
-    "Foot_Rot": {
-        "status": "Anabe Roga / Ganoderma Lucidum",
-        "description": "Bracket fungal infection attacking root bases, causing leaf drooping and trunk brittleness.",
-        "advisory_en": "Dig isolation trenches around the palm and drench root zone with 0.2% Hexaconazole.",
-        "advisory_kn": "ಮರದ ಸುತ್ತ ಬಸಿಗಾಲುವೆ ತೋಡಿ ಬೇರಿಗೆ ಹೆಕ್ಸಾಕೊನಜೋಲ್ (೦.೨%) ದ್ರಾವಣ ಸುರಿಯಿರಿ.",
-        "management": [
-            "Dig isolation trenches (30 cm wide and 60 cm deep) around diseased palms.",
-            "Drench root zones with Hexaconazole (0.2%) or Captan solution.",
-            "Uproot and burn dead palms along with root stumps to prevent spore dispersal."
         ]
     }
 }
@@ -149,7 +152,7 @@ class Base64ImageRequest(BaseModel):
 # ---------------------------------------------------------
 def preprocess_image(image_bytes: bytes) -> tuple[np.ndarray, Image.Image]:
     with Image.open(io.BytesIO(image_bytes)) as img:
-        img.draft("RGB", (512, 512))
+        img = ImageOps.exif_transpose(img)
         resized_image = img.convert("RGB").resize(IMAGE_SIZE, Image.Resampling.BILINEAR)
     img_array = np.asarray(resized_image, dtype=np.float32) / 255.0
     return np.expand_dims(img_array, axis=0), resized_image
