@@ -1,16 +1,20 @@
-import base64
 import io
-from typing import Dict, Any, Tuple
-import cv2
-from fastapi import FastAPI, UploadFile
-from fastapi.middleware.cors import CORSMiddleware
+import os
+import base64
 import numpy as np
 from PIL import Image
-from pydantic import BaseModel
+import cv2
 import tensorflow as tf
+from pydantic import BaseModel
+from fastapi import FastAPI, File, UploadFile, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 
-app = FastAPI(title="Arecanut Disease & Severity API")
+app = FastAPI(
+    title="ArecaGuard - Arecanut Disease Detection & Severity Analysis API",
+    version="1.0.0"
+)
 
+# Enable CORS for React Native / Expo and Web clients
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -19,167 +23,282 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-MODEL_PATH = "models/arecanut_classifier.keras"
-import tf_keras
+# ---------------------------------------------------------
+# 1. Model & Paths Setup
+# ---------------------------------------------------------
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+MODEL_PATH = os.path.join(BASE_DIR, "models", "arecanut_classifier.keras")
 
-# Load model architecture and weights without re-compiling training graphs
 try:
-    model = tf_keras.models.load_model(MODEL_PATH, compile=False)
-except Exception:
-    import tensorflow as tf
-    model = tf.keras.models.load_model(MODEL_PATH, compile=False)
+    model = tf.keras.models.load_model(MODEL_PATH)
+    print(f"SUCCESS: Model loaded successfully from {MODEL_PATH}")
+except Exception as e:
+    model = None
+    print(f"ERROR: Failed to load model -> {e}")
 
-CLASSES = [
-    'Bud_Borer_Rot', 
-    'Healthy', 
-    'Koleroga', 
-    'Stem_Bleeding', 
-    'Stem_Cracking', 
-    'Yellow_Leaf_Disease'
+# Exact 6 classes matching dataset_ready folder order
+CLASS_NAMES = [
+    "Bud_Rot",
+    "Foot_Rot",
+    "Healthy",
+    "Mahali_Koleroga",
+    "Stem_Bleeding",
+    "Yellow_Leaf_Disease"
 ]
 
-MANAGEMENT_GUIDELINES: Dict[str, Dict[str, Dict[str, str]]] = {
+# Map model class names to the exact switch-case keys in mobile_app/App.js
+APP_DISEASE_MAP = {
+    "Bud_Rot": "Bud_Borer_Rot",
+    "Foot_Rot": "Foot_Rot",
+    "Healthy": "Healthy",
+    "Mahali_Koleroga": "Koleroga",
+    "Stem_Bleeding": "Stem_Bleeding",
+    "Yellow_Leaf_Disease": "Yellow_Leaf_Disease",
+}
+
+IMAGE_SIZE = (224, 224)
+
+# Disease remediation and bilingual advisory recommendations
+TREATMENTS = {
     "Healthy": {
-        "en": {
-            "name": "Healthy Plant",
-            "pathogen": "None (Plant is healthy)",
-            "action": "Maintain balanced NPK fertilization and clean basin weeding."
-        },
-        "kn": {
-            "name": "ಆರೋಗ್ಯಕರ ಸಸ್ಯ (Healthy)",
-            "pathogen": "ಯಾವುದೇ ರೋಗಾಣು ಇಲ್ಲ",
-            "action": "ಸರಿಯಾದ ಪ್ರಮಾಣದಲ್ಲಿ ಗೊಬ್ಬರ ಹಾಗೂ ನೀರಾವರಿ ನಿರ್ವಹಣೆ ಮುಂದುವರಿಸಿ."
-        }
+        "status": "Healthy",
+        "description": "No visible signs of pathogenic infection or fungal damage detected.",
+        "advisory_en": "Palm appears healthy. Continue routine organic mulching and split NPK fertilization.",
+        "advisory_kn": "ಅಡಿಕೆ ಮರ ಆರೋಗ್ಯಕರವಾಗಿದೆ. ನಿಯಮಿತ ಸಾವಯವ ಗೊಬ್ಬರ ಮತ್ತು ನೀರಾವರಿ ನಿರ್ವಹಣೆ ಮುಂದುವರಿಸಿ.",
+        "management": [
+            "Maintain regular nutrient schedules with balanced NPK application.",
+            "Ensure proper drainage during heavy monsoon downpours.",
+            "Conduct routine crown and stem canopy checks."
+        ]
     },
-    "Koleroga": {
-        "en": {
-            "name": "Koleroga / Fruit Rot",
-            "pathogen": "Phytophthora meadii (Fungus)",
-            "action": "Spray Bordeaux mixture (1%) before monsoon. Fasten polythene bunch covers."
-        },
-        "kn": {
-            "name": "ಕೊಳೆರೋಗ / ಮಹಾಲಿ (Koleroga)",
-            "pathogen": "ಫೈಟೊಫ್ತೋರಾ ಮೀಡಿಯೈ (ಶಿಲೀಂಧ್ರ)",
-            "action": "ಮಳೆಗಾಲ ಆರಂಭಕ್ಕೂ ಮುನ್ನ ಶೇ 1% ಬೋರ್ಡೋ ಮಿಶ್ರಣ ಸಿಂಪಡಿಸಿ ಅಥವಾ ಹಿಂಗಾರಿಗೆ ಪಾಲಿಥೀನ್ ಹೊದಿಕೆ ಕಟ್ಟಿ."
-        }
+    "Mahali_Koleroga": {
+        "status": "Severe Fungal Infection",
+        "description": "Fruit rot / Koleroga caused by Phytophthora meadii, common during heavy monsoon.",
+        "advisory_en": "Immediate 1% Bordeaux mixture spray recommended during a dry spell to arrest fruit rot.",
+        "advisory_kn": "ಕೊಳೆರೋಗ ನಿಯಂತ್ರಣಕ್ಕೆ ಮಳೆ ಬಿಡುವು ನೀಡಿದ ತಕ್ಷಣ ೧% ಬೋರ್ಡೋ ದ್ರಾವಣ ಸಿಂಪಡಿಸಿ.",
+        "management": [
+            "Spray 1% Bordeaux mixture before monsoon onset and give a second spray 40 days later.",
+            "Tie polythene covers over arecanut bunches in endemic areas to prevent rain splash infection.",
+            "Collect and destroy fallen infected nuts to curb fungal spore spread."
+        ]
     },
     "Yellow_Leaf_Disease": {
-        "en": {
-            "name": "Yellow Leaf Disease",
-            "pathogen": "Phytoplasma Organism",
-            "action": "Provide proper drainage. Apply farmyard manure, zinc, and boron micronutrients."
-        },
-        "kn": {
-            "name": "ಹಳದಿ ಎಲೆ ರೋಗ (Yellow Leaf Disease)",
-            "pathogen": "ಫೈಟೋಪ್ಲಾಸ್ಮಾ ಸೂಕ್ಷ್ಮಾಣುಜೀವಿ",
-            "action": "ತೋಟದಲ್ಲಿ ನೀರು ನಿಲ್ಲದಂತೆ ಬಸಿದು ಹೋಗಲು ಕಾಲುವೆ ಮಾಡಿ. ಬೇವಿನ ಹಿಂಡಿ ಮತ್ತು ಸೂಕ್ಷ್ಮ ಪೋಷಕಾಂಶಗಳನ್ನು ನೀಡಿ."
-        }
-    },
-    "Bud_Borer_Rot": {
-        "en": {
-            "name": "Bud Borer / Crown Rot",
-            "pathogen": "Crown Infestation / Decay",
-            "action": "Remove affected tissue. Apply copper oxychloride paste to the cut surface."
-        },
-        "kn": {
-            "name": "ಸುಳಿ ಕೊಳೆ ರೋಗ / ಹುಳು ಬಾಧೆ (Bud Rot)",
-            "pathogen": "ಸುಳಿ ಕೊಳೆಯುವಿಕೆ ಮತ್ತು ಕೀಟ ಬಾಧೆ",
-            "action": "ಕೊಳೆತ ಸುಳಿಯನ್ನು ಕತ್ತರಿಸಿ ತೆಗೆದು, ಆ ಜಾಗಕ್ಕೆ ತಾಮ್ರದ ಆಕ್ಸಿಕ್ಲೋರೈಡ್ ಪೇಸ್ಟ್ ಹಚ್ಚಿ."
-        }
+        "status": "Phytoplasma / Nutritional Stress",
+        "description": "Characterized by yellowing of inner whorl leaves, blackening of root tips, and nut drop.",
+        "advisory_en": "Apply Magnesium Sulphate (500g/palm), vermicompost, and improve root-zone drainage.",
+        "advisory_kn": "ಪ್ರತಿ ಮರಕ್ಕೆ ೫೦೦ ಗ್ರಾಂ ಮೆಗ್ನೀಶಿಯಂ ಸಲ್ಫೇಟ್, ಎರೆಹುಳು ಗೊಬ್ಬರ ನೀಡಿ ಮತ್ತು ಬಸಿಗಾಲುವೆ ಸರಿಪಡಿಸಿ.",
+        "management": [
+            "Apply additional dosage of balanced organic manure along with zinc sulphate and magnesium sulphate.",
+            "Improve soil drainage and avoid waterlogging around palm roots.",
+            "Remove severely stunted, unproductive palms and replant with tolerant cultivars."
+        ]
     },
     "Stem_Bleeding": {
-        "en": {
-            "name": "Stem Bleeding",
-            "pathogen": "Thielaviopsis paradoxa (Fungus)",
-            "action": "Chisel diseased bark patches. Apply coal tar or Bordeaux paste; drench root basin."
-        },
-        "kn": {
-            "name": "ಕಾಂಡ ಸೋರುವಿಕೆ (Stem Bleeding)",
-            "pathogen": "ಥೀಲಾವಿಯೊಪ್ಸಿಸ್ ಪ್ಯಾರಾಡಾಕ್ಸಾ (ಶಿಲೀಂಧ್ರ)",
-            "action": "ರೋಗಪೀಡಿತ ಕಾಂಡದ ಭಾಗವನ್ನು ಕೆತ್ತಿ ತೆಗೆದು ಬೋರ್ಡೋ ಪೇಸ್ಟ್ ಅಥವಾ ಡಾಂಬರು ಹಚ್ಚಿ."
-        }
+        "status": "Thielaviopsis paradoxa Fungal Lesion",
+        "description": "Exudation of dark reddish-brown liquid through cracks on the trunk.",
+        "advisory_en": "Chisel out infected bark tissue and coat the exposed wound with Coal Tar or Bordeaux paste.",
+        "advisory_kn": "ಸೋಂಕಿತ ತೊಗಟೆಯನ್ನು ಕೆತ್ತಿ ತೆಗೆದು ಕಲ್ಲಿದ್ದಲು ಡಾಂಬರು ಅಥವಾ ಬೋರ್ಡೋ ಪೇಸ್ಟ್ ಹಚ್ಚಿ.",
+        "management": [
+            "Chisel out infected bark tissue cleanly until fresh tissue is exposed.",
+            "Swab the wounded trunk area with Coal Tar or 5% Calixin/Hexaconazole paste.",
+            "Apply Trichoderma-enriched neem cake (5 kg per palm) in the root basin."
+        ]
     },
-    "Stem_Cracking": {
-        "en": {
-            "name": "Stem Cracking",
-            "pathogen": "Nutritional Stress / Moisture Fluctuation",
-            "action": "Maintain uniform irrigation to prevent moisture stress; apply borax."
-        },
-        "kn": {
-            "name": "ಕಾಂಡ ಬಿರುಕು ಬಿಡುವುದು (Stem Cracking)",
-            "pathogen": "ನೀರಿನ ಕೊರತೆ ಮತ್ತು ಬೋರಾನ್ ಪೋಷಕಾಂಶದ ವ್ಯತ್ಯಯ",
-            "action": "ತೋಟಕ್ಕೆ ನಿಯಮಿತವಾಗಿ ನೀರು ಹಾಯಿಸಿ, ಶಿಫಾರಸು ಮಾಡಿದ ಪ್ರಮಾಣದಲ್ಲಿ ಬೊರಾಕ್ಸ್ ನೀಡಿ."
-        }
+    "Bud_Rot": {
+        "status": "Phytophthora palmivora Infection",
+        "description": "Infection of growing bud tissues resulting in rotting and heart leaf shedding.",
+        "advisory_en": "Excise decaying spindle tissue immediately and apply 10% Bordeaux paste into the crown.",
+        "advisory_kn": "ಕೊಳೆತ ಸುಳಿ ಭಾಗವನ್ನು ಸ್ವಚ್ಛಗೊಳಿಸಿ ಸುಳಿಯ ಒಳಗೆ ೧೦% ಬೋರ್ಡೋ ಪೇಸ್ಟ್ ಹಾಕಿ.",
+        "management": [
+            "Scoop out infected rotten spindle and bud tissue in the early stage.",
+            "Treat crown cavity with 10% Bordeaux paste or apply Mancozeb paste.",
+            "Cover treated crown with a protective cap to shield from rainwater."
+        ]
+    },
+    "Foot_Rot": {
+        "status": "Anabe Roga / Ganoderma Lucidum",
+        "description": "Bracket fungal infection attacking root bases, causing leaf drooping and trunk brittleness.",
+        "advisory_en": "Dig isolation trenches around the palm and drench root zone with 0.2% Hexaconazole.",
+        "advisory_kn": "ಮರದ ಸುತ್ತ ಬಸಿಗಾಲುವೆ ತೋಡಿ ಬೇರಿಗೆ ಹೆಕ್ಸಾಕೊನಜೋಲ್ (೦.೨%) ದ್ರಾವಣ ಸುರಿಯಿರಿ.",
+        "management": [
+            "Dig isolation trenches (30 cm wide and 60 cm deep) around diseased palms.",
+            "Drench root zones with Hexaconazole (0.2%) or Captan solution.",
+            "Uproot and burn dead palms along with root stumps to prevent spore dispersal."
+        ]
     }
 }
 
-class ImageData(BaseModel):
+class Base64ImageRequest(BaseModel):
     image_base64: str
 
-def compute_severity(image_rgb: np.ndarray, predicted_class: str) -> Tuple[float, str]:
-    if predicted_class == "Healthy":
-        return 0.0, "Healthy"
+# ---------------------------------------------------------
+# 2. Image Preprocessing & Grad-CAM Helpers
+# ---------------------------------------------------------
+def preprocess_image(image_bytes: bytes) -> tuple[np.ndarray, Image.Image]:
+    image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+    resized_image = image.resize(IMAGE_SIZE)
+    img_array = np.array(resized_image, dtype=np.float32) / 255.0
+    return np.expand_dims(img_array, axis=0), image
 
-    img_bgr = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2BGR)
-    hsv = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2HSV)
 
-    tissue_mask = cv2.inRange(hsv, np.array([10, 25, 25]), np.array([100, 255, 255]))
-    lesion_mask = cv2.inRange(hsv, np.array([10, 70, 50]), np.array([35, 255, 220]))
-    lesion_in_tissue = cv2.bitwise_and(lesion_mask, lesion_mask, mask=tissue_mask)
+def find_last_conv_layer(keras_model) -> str:
+    """Find the name of the last Conv2D layer in the architecture."""
+    for layer in reversed(keras_model.layers):
+        if isinstance(layer, tf.keras.layers.Conv2D):
+            return layer.name
+        if hasattr(layer, "layers"):
+            for sub_layer in reversed(layer.layers):
+                if isinstance(sub_layer, tf.keras.layers.Conv2D):
+                    return layer.name
+    return None
 
-    total_tissue = int(cv2.countNonZero(tissue_mask))
-    total_lesions = int(cv2.countNonZero(lesion_in_tissue))
 
-    if total_tissue == 0:
-        return 0.0, "Healthy"
+def generate_gradcam_overlay(img_array: np.ndarray, original_img: Image.Image, pred_index: int) -> tuple[str | None, float]:
+    """Generate Grad-CAM heatmap overlay and compute infected surface-area percentage."""
+    try:
+        last_conv_name = find_last_conv_layer(model)
+        if not last_conv_name:
+            return None, 0.0
 
-    pct = round((total_lesions / total_tissue) * 100.0, 2)
-    if pct < 2.0:
-        tier = "Healthy"
-    elif pct < 15.0:
-        tier = "Mild"
-    elif pct < 35.0:
-        tier = "Moderate"
+        grad_model = tf.keras.models.Model(
+            inputs=[model.inputs],
+            outputs=[model.get_layer(last_conv_name).output, model.output]
+        )
+
+        with tf.GradientTape() as tape:
+            conv_outputs, predictions = grad_model(img_array)
+            loss = predictions[:, pred_index]
+
+        grads = tape.gradient(loss, conv_outputs)
+        pooled_grads = tf.reduce_mean(grads, axis=(0, 1, 2))
+
+        conv_outputs = conv_outputs[0]
+        heatmap = conv_outputs @ pooled_grads[..., tf.newaxis]
+        heatmap = tf.squeeze(heatmap)
+
+        heatmap = tf.maximum(heatmap, 0) / (tf.math.reduce_max(heatmap) + 1e-10)
+        heatmap = heatmap.numpy()
+
+        # Infected surface area ratio (A_disease / A_total * 100) using activation threshold > 0.5
+        infected_ratio = float(np.mean(heatmap > 0.5) * 100)
+
+        orig_np = np.array(original_img)
+        orig_h, orig_w = orig_np.shape[:2]
+        heatmap_resized = cv2.resize(heatmap, (orig_w, orig_h))
+        heatmap_uint8 = np.uint8(255 * heatmap_resized)
+
+        color_heatmap = cv2.applyColorMap(heatmap_uint8, cv2.COLORMAP_JET)
+        color_heatmap = cv2.cvtColor(color_heatmap, cv2.COLOR_BGR2RGB)
+
+        superimposed_img = np.uint8(orig_np * 0.6 + color_heatmap * 0.4)
+
+        overlay_pil = Image.fromarray(superimposed_img)
+        buffer = io.BytesIO()
+        overlay_pil.save(buffer, format="JPEG", quality=85)
+        encoded_str = base64.b64encode(buffer.getvalue()).decode("utf-8")
+        return f"data:image/jpeg;base64,{encoded_str}", round(infected_ratio, 2)
+    except Exception as cam_err:
+        print(f"Grad-CAM generation skipped: {cam_err}")
+        return None, 0.0
+
+
+def run_prediction_pipeline(image_bytes: bytes) -> dict:
+    processed_img, original_img = preprocess_image(image_bytes)
+
+    raw_predictions = model.predict(processed_img)
+    predicted_idx = int(np.argmax(raw_predictions[0]))
+    confidence = float(raw_predictions[0][predicted_idx])
+
+    if predicted_idx < len(CLASS_NAMES):
+        raw_class_name = CLASS_NAMES[predicted_idx]
     else:
-        tier = "Severe"
+        raw_class_name = f"Class_{predicted_idx}"
 
-    return pct, tier
+    app_disease_key = APP_DISEASE_MAP.get(raw_class_name, raw_class_name)
 
-def run_model_inference(image_pil: Image.Image) -> Dict[str, Any]:
-    image_np = np.array(image_pil.convert("RGB"))
+    confidence_pct = round(confidence * 100, 2)
+    heatmap_b64, infected_pct = generate_gradcam_overlay(processed_img, original_img, predicted_idx)
 
-    resized = cv2.resize(image_np, (224, 224)) / 255.0
-    input_tensor = np.expand_dims(resized, axis=0)
+    if raw_class_name == "Healthy":
+        severity = "None"
+        severity_pct = 0.0
+    else:
+        severity_pct = infected_pct if infected_pct > 0 else round(confidence_pct * 0.65, 2)
+        if severity_pct >= 50 or confidence_pct >= 85:
+            severity = "High"
+        elif severity_pct >= 20 or confidence_pct >= 60:
+            severity = "Moderate"
+        else:
+            severity = "Low"
 
-    # In modern Keras, calling model(tensor) directly is faster and cleaner
-    preds = model.predict(input_tensor, verbose=0)[0]
-    idx = int(np.argmax(preds))
-    confidence = float(preds[idx]) * 100.0
-    predicted_class = CLASSES[idx]
+    all_probabilities = {}
+    for i, prob in enumerate(raw_predictions[0]):
+        lbl = CLASS_NAMES[i] if i < len(CLASS_NAMES) else f"Class_{i}"
+        all_probabilities[lbl] = round(float(prob) * 100, 2)
 
-    severity_pct, severity_tier = compute_severity(image_np, predicted_class)
-    advisory = MANAGEMENT_GUIDELINES.get(predicted_class, {})
+    remediation_info = TREATMENTS.get(raw_class_name, {
+        "status": "Identified",
+        "description": "Refer to an agricultural officer for tailored diagnosis.",
+        "advisory_en": "Consult a local horticulture officer for field inspection.",
+        "advisory_kn": "ಸ್ಥಳೀಯ ತೋಟಗಾರಿಕಾ ಅಧಿಕಾರಿಗಳನ್ನು ಸಂಪರ್ಕಿಸಿ.",
+        "management": ["Isolate affected palm and avoid excess surface irrigation."]
+    })
 
     return {
-        "disease": predicted_class,
-        "confidence": round(confidence, 2),
+        "disease": app_disease_key,
+        "prediction": raw_class_name,
+        "confidence": confidence_pct,
+        "severity_level": severity,
+        "severity": severity,
         "severity_percentage": severity_pct,
-        "severity_level": severity_tier,
-        "advisory_en": advisory.get("en", {}),
-        "advisory_kn": advisory.get("kn", {})
+        "advisory_en": remediation_info["advisory_en"],
+        "advisory_kn": remediation_info["advisory_kn"],
+        "all_probabilities": all_probabilities,
+        "heatmap_base64": heatmap_b64,
+        "treatment": remediation_info
     }
 
-@app.post("/predict_base64")
-async def predict_crop_base64(data: ImageData):
-    img_bytes = base64.b64decode(data.image_base64)
-    image = Image.open(io.BytesIO(img_bytes))
-    return run_model_inference(image)
+# ---------------------------------------------------------
+# 3. API Routes
+# ---------------------------------------------------------
+@app.get("/")
+def health_check():
+    return {
+        "status": "online",
+        "model_loaded": model is not None,
+        "classes_supported": len(CLASS_NAMES)
+    }
+
 
 @app.post("/predict")
-async def predict_crop(file: UploadFile):
-    contents = await file.read()
-    image = Image.open(io.BytesIO(contents))
-    return run_model_inference(image)
+async def predict_image(file: UploadFile = File(...)):
+    if model is None:
+        raise HTTPException(status_code=500, detail="Classifier model is not loaded.")
+
+    if not file.content_type or not file.content_type.startswith("image/"):
+        raise HTTPException(status_code=400, detail="Uploaded file must be a valid image.")
+
+    try:
+        contents = await file.read()
+        return run_prediction_pipeline(contents)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Inference error: {str(e)}")
+
+
+@app.post("/predict_base64")
+async def predict_base64_image(payload: Base64ImageRequest):
+    if model is None:
+        raise HTTPException(status_code=500, detail="Classifier model is not loaded.")
+
+    try:
+        b64_data = payload.image_base64
+        if "," in b64_data:
+            b64_data = b64_data.split(",", 1)[1]
+        image_bytes = base64.b64decode(b64_data)
+        return run_prediction_pipeline(image_bytes)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Base64 inference error: {str(e)}")
+
 
 if __name__ == "__main__":
     import uvicorn
