@@ -1,3 +1,4 @@
+import gc
 import io
 import os
 import base64
@@ -14,7 +15,6 @@ app = FastAPI(
     version="1.0.0"
 )
 
-# Enable CORS for React Native / Expo and Web clients
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -29,14 +29,31 @@ app.add_middleware(
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MODEL_PATH = os.path.join(BASE_DIR, "models", "arecanut_classifier.h5")
 
+def find_last_conv_layer(keras_model) -> str:
+    for layer in reversed(keras_model.layers):
+        if isinstance(layer, tf.keras.layers.Conv2D):
+            return layer.name
+        if hasattr(layer, "layers"):
+            for sub_layer in reversed(layer.layers):
+                if isinstance(sub_layer, tf.keras.layers.Conv2D):
+                    return layer.name
+    return None
+
+grad_model = None
 try:
-    model = tf.keras.models.load_model(MODEL_PATH)
+    model = tf.keras.models.load_model(MODEL_PATH, compile=False)
+    last_conv_name = find_last_conv_layer(model)
+    if last_conv_name:
+        grad_model = tf.keras.models.Model(
+            inputs=[model.inputs],
+            outputs=[model.get_layer(last_conv_name).output, model.output]
+        )
+    gc.collect()
     print(f"SUCCESS: Model loaded successfully from {MODEL_PATH}")
 except Exception as e:
     model = None
     print(f"ERROR: Failed to load model -> {e}")
 
-# Exact 6 classes matching dataset_ready folder order
 CLASS_NAMES = [
     "Bud_Rot",
     "Foot_Rot",
@@ -46,7 +63,6 @@ CLASS_NAMES = [
     "Yellow_Leaf_Disease"
 ]
 
-# Map model class names to the exact switch-case keys in mobile_app/App.js
 APP_DISEASE_MAP = {
     "Bud_Rot": "Bud_Borer_Rot",
     "Foot_Rot": "Foot_Rot",
@@ -58,7 +74,6 @@ APP_DISEASE_MAP = {
 
 IMAGE_SIZE = (224, 224)
 
-# Disease remediation and bilingual advisory recommendations
 TREATMENTS = {
     "Healthy": {
         "status": "Healthy",
@@ -132,41 +147,23 @@ class Base64ImageRequest(BaseModel):
     image_base64: str
 
 # ---------------------------------------------------------
-# 2. Image Preprocessing & Grad-CAM Helpers
+# 2. Memory-Safe Image Preprocessing & Grad-CAM Helpers
 # ---------------------------------------------------------
 def preprocess_image(image_bytes: bytes) -> tuple[np.ndarray, Image.Image]:
-    image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-    resized_image = image.resize(IMAGE_SIZE)
-    img_array = np.array(resized_image, dtype=np.float32) / 255.0
-    return np.expand_dims(img_array, axis=0), image
+    with Image.open(io.BytesIO(image_bytes)) as img:
+        img.draft("RGB", (512, 512))
+        resized_image = img.convert("RGB").resize(IMAGE_SIZE, Image.Resampling.BILINEAR)
+    img_array = np.asarray(resized_image, dtype=np.float32) / 255.0
+    return np.expand_dims(img_array, axis=0), resized_image
 
 
-def find_last_conv_layer(keras_model) -> str:
-    """Find the name of the last Conv2D layer in the architecture."""
-    for layer in reversed(keras_model.layers):
-        if isinstance(layer, tf.keras.layers.Conv2D):
-            return layer.name
-        if hasattr(layer, "layers"):
-            for sub_layer in reversed(layer.layers):
-                if isinstance(sub_layer, tf.keras.layers.Conv2D):
-                    return layer.name
-    return None
-
-
-def generate_gradcam_overlay(img_array: np.ndarray, original_img: Image.Image, pred_index: int) -> tuple[str | None, float]:
-    """Generate Grad-CAM heatmap overlay and compute infected surface-area percentage."""
+def generate_gradcam_overlay(img_array: np.ndarray, resized_img: Image.Image, pred_index: int) -> tuple[str | None, float]:
     try:
-        last_conv_name = find_last_conv_layer(model)
-        if not last_conv_name:
+        if grad_model is None:
             return None, 0.0
 
-        grad_model = tf.keras.models.Model(
-            inputs=[model.inputs],
-            outputs=[model.get_layer(last_conv_name).output, model.output]
-        )
-
         with tf.GradientTape() as tape:
-            conv_outputs, predictions = grad_model(img_array)
+            conv_outputs, predictions = grad_model(img_array, training=False)
             loss = predictions[:, pred_index]
 
         grads = tape.gradient(loss, conv_outputs)
@@ -177,24 +174,22 @@ def generate_gradcam_overlay(img_array: np.ndarray, original_img: Image.Image, p
         heatmap = tf.squeeze(heatmap)
 
         heatmap = tf.maximum(heatmap, 0) / (tf.math.reduce_max(heatmap) + 1e-10)
-        heatmap = heatmap.numpy()
+        heatmap_np = heatmap.numpy()
 
-        # Infected surface area ratio (A_disease / A_total * 100) using activation threshold > 0.5
-        infected_ratio = float(np.mean(heatmap > 0.5) * 100)
+        infected_ratio = float(np.mean(heatmap_np > 0.5) * 100)
 
-        orig_np = np.array(original_img)
-        orig_h, orig_w = orig_np.shape[:2]
-        heatmap_resized = cv2.resize(heatmap, (orig_w, orig_h))
+        orig_np = np.asarray(resized_img, dtype=np.float32)
+        heatmap_resized = cv2.resize(heatmap_np, IMAGE_SIZE)
         heatmap_uint8 = np.uint8(255 * heatmap_resized)
 
         color_heatmap = cv2.applyColorMap(heatmap_uint8, cv2.COLORMAP_JET)
-        color_heatmap = cv2.cvtColor(color_heatmap, cv2.COLOR_BGR2RGB)
+        color_heatmap = cv2.cvtColor(color_heatmap, cv2.COLOR_BGR2RGB).astype(np.float32)
 
         superimposed_img = np.uint8(orig_np * 0.6 + color_heatmap * 0.4)
 
         overlay_pil = Image.fromarray(superimposed_img)
         buffer = io.BytesIO()
-        overlay_pil.save(buffer, format="JPEG", quality=85)
+        overlay_pil.save(buffer, format="JPEG", quality=80)
         encoded_str = base64.b64encode(buffer.getvalue()).decode("utf-8")
         return f"data:image/jpeg;base64,{encoded_str}", round(infected_ratio, 2)
     except Exception as cam_err:
@@ -203,60 +198,59 @@ def generate_gradcam_overlay(img_array: np.ndarray, original_img: Image.Image, p
 
 
 def run_prediction_pipeline(image_bytes: bytes) -> dict:
-    processed_img, original_img = preprocess_image(image_bytes)
+    try:
+        processed_img, resized_img = preprocess_image(image_bytes)
 
-    raw_predictions = model.predict(processed_img)
-    predicted_idx = int(np.argmax(raw_predictions[0]))
-    confidence = float(raw_predictions[0][predicted_idx])
+        raw_predictions = model(processed_img, training=False).numpy()
+        predicted_idx = int(np.argmax(raw_predictions[0]))
+        confidence = float(raw_predictions[0][predicted_idx])
 
-    if predicted_idx < len(CLASS_NAMES):
-        raw_class_name = CLASS_NAMES[predicted_idx]
-    else:
-        raw_class_name = f"Class_{predicted_idx}"
+        raw_class_name = CLASS_NAMES[predicted_idx] if predicted_idx < len(CLASS_NAMES) else f"Class_{predicted_idx}"
+        app_disease_key = APP_DISEASE_MAP.get(raw_class_name, raw_class_name)
 
-    app_disease_key = APP_DISEASE_MAP.get(raw_class_name, raw_class_name)
+        confidence_pct = round(confidence * 100, 2)
+        heatmap_b64, infected_pct = generate_gradcam_overlay(processed_img, resized_img, predicted_idx)
 
-    confidence_pct = round(confidence * 100, 2)
-    heatmap_b64, infected_pct = generate_gradcam_overlay(processed_img, original_img, predicted_idx)
-
-    if raw_class_name == "Healthy":
-        severity = "None"
-        severity_pct = 0.0
-    else:
-        severity_pct = infected_pct if infected_pct > 0 else round(confidence_pct * 0.65, 2)
-        if severity_pct >= 50 or confidence_pct >= 85:
-            severity = "High"
-        elif severity_pct >= 20 or confidence_pct >= 60:
-            severity = "Moderate"
+        if raw_class_name == "Healthy":
+            severity = "Healthy"
+            severity_pct = 0.0
         else:
-            severity = "Low"
+            severity_pct = infected_pct if infected_pct > 0 else round(confidence_pct * 0.65, 2)
+            if severity_pct >= 50 or confidence_pct >= 85:
+                severity = "Severe"
+            elif severity_pct >= 20 or confidence_pct >= 60:
+                severity = "Moderate"
+            else:
+                severity = "Mild"
 
-    all_probabilities = {}
-    for i, prob in enumerate(raw_predictions[0]):
-        lbl = CLASS_NAMES[i] if i < len(CLASS_NAMES) else f"Class_{i}"
-        all_probabilities[lbl] = round(float(prob) * 100, 2)
+        all_probabilities = {
+            (CLASS_NAMES[i] if i < len(CLASS_NAMES) else f"Class_{i}"): round(float(prob) * 100, 2)
+            for i, prob in enumerate(raw_predictions[0])
+        }
 
-    remediation_info = TREATMENTS.get(raw_class_name, {
-        "status": "Identified",
-        "description": "Refer to an agricultural officer for tailored diagnosis.",
-        "advisory_en": "Consult a local horticulture officer for field inspection.",
-        "advisory_kn": "ಸ್ಥಳೀಯ ತೋಟಗಾರಿಕಾ ಅಧಿಕಾರಿಗಳನ್ನು ಸಂಪರ್ಕಿಸಿ.",
-        "management": ["Isolate affected palm and avoid excess surface irrigation."]
-    })
+        remediation_info = TREATMENTS.get(raw_class_name, {
+            "status": "Identified",
+            "description": "Refer to an agricultural officer for tailored diagnosis.",
+            "advisory_en": "Consult a local horticulture officer for field inspection.",
+            "advisory_kn": "ಸ್ಥಳೀಯ ತೋಟಗಾರಿಕಾ ಅಧಿಕಾರಿಗಳನ್ನು ಸಂಪರ್ಕಿಸಿ.",
+            "management": ["Isolate affected palm and avoid excess surface irrigation."]
+        })
 
-    return {
-        "disease": app_disease_key,
-        "prediction": raw_class_name,
-        "confidence": confidence_pct,
-        "severity_level": severity,
-        "severity": severity,
-        "severity_percentage": severity_pct,
-        "advisory_en": remediation_info["advisory_en"],
-        "advisory_kn": remediation_info["advisory_kn"],
-        "all_probabilities": all_probabilities,
-        "heatmap_base64": heatmap_b64,
-        "treatment": remediation_info
-    }
+        return {
+            "disease": app_disease_key,
+            "prediction": raw_class_name,
+            "confidence": confidence_pct,
+            "severity_level": severity,
+            "severity": severity,
+            "severity_percentage": severity_pct,
+            "advisory_en": remediation_info["advisory_en"],
+            "advisory_kn": remediation_info["advisory_kn"],
+            "all_probabilities": all_probabilities,
+            "heatmap_base64": heatmap_b64,
+            "treatment": remediation_info
+        }
+    finally:
+        gc.collect()
 
 # ---------------------------------------------------------
 # 3. API Routes
